@@ -1,0 +1,272 @@
+---
+title: "Lymphoma"
+output: html_document
+date: "2023-07-14"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Installations and imports
+
+```{r}
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(hdf5r)
+library(Signac)
+library(EnsDb.Hsapiens.v86)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(ggplot2)
+library(cowplot)
+```
+
+## Data
+
+Reading the data
+TODO: both for raw and filtered, what are the steps to get filtered?
+
+```{r}
+# load the RNA and ATAC data
+setwd("~/R_scripts")
+counts <- Read10X_h5("../datasets/lymphoma_10x/lymph_node_lymphoma_14k_filtered_feature_bc_matrix.h5")
+fragpath <- "../datasets/lymphoma_10x/lymph_node_lymphoma_14k_atac_fragments.tsv.gz"
+
+metadata <- read.csv(
+  file = "../datasets/lymphoma_10x/lymph_node_lymphoma_14k_per_barcode_metrics.csv",
+  header = TRUE,
+  row.names = 1
+)
+
+```
+
+Creating the Seurat object and annotating the data. 
+Selecting scATAC subset
+
+```{r}
+# get gene annotations for hg38
+annotation <- GetGRangesFromEnsDb(ensdb = EnsDb.Hsapiens.v86)
+seqlevels(annotation) <- paste0('chr', seqlevels(annotation))
+
+# create a Seurat object containing the RNA adata
+lymph <- CreateSeuratObject(
+  counts = counts$`Gene Expression`,
+  assay = "RNA",
+  meta.data = metadata
+)
+
+# create ATAC assay and add it to the object
+lymph[["ATAC"]] <- CreateChromatinAssay(
+  counts = counts$Peaks,
+  sep = c(":", "-"),
+  fragments = fragpath,
+  annotation = annotation
+)
+
+lymph
+```
+
+```{r}
+saveRDS(lymph, file='./temp_data/lymph_f_nf_annotated.RDS')
+```
+
+## Quality control
+
+Checking the distribution of the data:
+
+```{r}
+DefaultAssay(lymph) <- "ATAC"
+
+# compute nucleosome signal score per cell
+lymph <- NucleosomeSignal(lymph)
+# compute TSS enrichment score per cell
+lymph <- TSSEnrichment(lymph, fast=FALSE)
+
+# add blacklist ratio and fraction of reads in peaks
+#lymph$pct_reads_in_peaks <- lymph$atac_peak_region_fragments / lymph$passed_filters * 100
+#lymph$blacklist_ratio <- lymph$blacklist_region_fragments / lymph$peak_region_fragments
+```
+
+```{r}
+saveRDS(lymph, file='./temp_data/lymph_f_nf_annotated_withQC.RDS')
+```
+
+Some plots:
+
+Useful plot to understand the relationship between TSS and peak counts (or any other variables)
+
+```{r}
+DensityScatter(lymph, x = 'atac_peak_region_fragments', y = 'TSS.enrichment', log_x = TRUE, quantiles = TRUE)
+```
+
+Inspecting the TSS enrichment scores by grouping the cells based on the score and plotting the accessibility signal over all TSS sites
+
+```{r}
+lymph$high.tss <- ifelse(lymph$TSS.enrichment > 2, 'High', 'Low')
+TSSPlot(lymph, group.by = 'high.tss') + NoLegend()
+```
+
+Fragment length periodicity for all the cells, and group by cells with high or low nucleosomal signal strength
+
+```{r}
+lymph$nucleosome_group <- ifelse(lymph$nucleosome_signal > 4, 'NS > 4', 'NS < 4')
+FragmentHistogram(object = lymph, group.by = 'nucleosome_group')
+```
+
+Distributions of all metrics:
+
+```{r}
+VlnPlot(
+  object = lymph,
+  features ='atac_peak_region_fragments'
+)
+
+VlnPlot(
+  object = lymph,
+  features = 'TSS.enrichment'
+)
+
+VlnPlot(
+  object = lymph,
+  features = 'nucleosome_signal'
+)
+```
+
+### Filtering 
+Filtering out low quality cells and genes. Here we are selecting constants based on the distributions above:
+
+```{r}
+# filter out low quality cells
+lymph <- subset(
+  x = lymph,
+  subset = nCount_ATAC < 100000 &
+    nCount_RNA < 25000 &
+    nCount_ATAC > 1000 &
+    nCount_RNA > 1000 &
+    nucleosome_signal < 2 &
+    TSS.enrichment > 1
+)
+lymph
+```
+
+```{r}
+saveRDS(lymph, file='./temp_data/lymph_f_nf_annotated_withQC_filtered.RDS')
+```
+
+Checking the distributions of all metrics again:
+
+```{r}
+VlnPlot(
+  object = lymph,
+  features ='atac_peak_region_fragments'
+)
+
+VlnPlot(
+  object = lymph,
+  features = 'TSS.enrichment'
+)
+
+VlnPlot(
+  object = lymph,
+  features = 'nucleosome_signal'
+)
+```
+
+## Normalisation 
+
+CHECK HOW THEY ALL WORK!!!
+
+Signac performs term frequency-inverse document frequency (TF-IDF) normalization. This is a two-step normalization procedure, that both normalizes across cells to correct for differences in cellular sequencing depth, and across peaks to give higher values to more rare peaks. FORMULA??
+
+```{r}
+lymph <- RunTFIDF(lymph)
+```
+
+Then we do feature selection - selecting top n% features, we can set then by q = percent to remove.
+Features used for dimensional reduction are automatically set as VariableFeatures() for the Seurat object by this function.
+Here we will use all????
+
+```{r}
+lymph <- FindTopFeatures(lymph, min.cutoff = 'q0')
+```
+
+Now we do dimension reduction - here we run singular value decomposition (SVD) on the TD-IDF matrix, using the features (peaks) selected above. This returns a reduced dimension representation of the object.
+WHATS THE METHOD AND FORMULA??
+
+```{r}
+lymph <- RunSVD(lymph)
+```
+
+Correlation between components:
+
+```{r}
+DepthCor(lymph)
+```
+
+```{r}
+saveRDS(lymph, file='./temp_data/lymph_f_nf_withPCA.RDS')
+
+lymph <- readRDS("./temp_data/lymph_f_nf_withPCA.RDS")
+```
+
+## Peak calling 
+
+```{r}
+
+
+# call peaks using MACS2
+peaks <- CallPeaks(lymph, macs2.path = '/home/annac/mambaforge/bin/macs2')
+
+# remove peaks on nonstandard chromosomes and in genomic blacklist regions
+peaks <- keepStandardChromosomes(peaks, pruning.mode = "coarse")
+peaks <- subsetByOverlaps(x = peaks, ranges = blacklist_hg38_unified, invert = TRUE)
+
+# quantify counts in each peak
+macs2_counts <- FeatureMatrix(
+  fragments = Fragments(lymph),
+  features = peaks,
+  cells = colnames(lymph)
+)
+
+# create a new assay using the MACS2 peak set and add it to the Seurat object
+lymph[["peaks"]] <- CreateChromatinAssay(
+  counts = macs2_counts,
+  fragments = fragpath,
+  annotation = annotation
+)
+```
+
+
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
