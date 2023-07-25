@@ -11,9 +11,7 @@ first = r_regression(matrix_for_genes, matrix_for_cells[0])
 corr_matrix_genes = np.array(first)
 
 def func_calc(gene_a):
-    next = r_regression(matrix_for_genes, matrix_for_cells[gene_a])   # X = (n_samples, n_features), Y = (n_samples,)
-    corr_matrix_genes = np.vstack((corr_matrix_genes, next))
-
+    return r_regression(matrix_for_genes, matrix_for_cells[gene_a])   # X = (n_samples, n_features), Y = n samples
 
 if __name__ == '__main__':
     N = mp.cpu_count()
@@ -22,7 +20,8 @@ if __name__ == '__main__':
     matrix_for_cells = np.load('/home/annac/datasets/kidney_10x/matrix_for_cells')
 
     with mp.Pool(processes = N) as p:
-        final_matrix = p.map(func_calc, range(1, 67150))
+        result = p.map(func_calc, range(1, 67150))
 
 # saving the fina;e corr martix 
+final_matrix = np.array(result)
 np.save('corr_matrix_genes', final_matrix)
