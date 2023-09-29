@@ -1,0 +1,510 @@
+---
+title: "pearson_corr_entropy"
+output: html_document
+date: "2023-07-25"
+---
+
+## Some preparations
+
+```{r setup, include=FALSE}
+library("entropy")
+library(ggplot2)
+library(gridExtra)
+library(Seurat)
+
+library(SeuratDisk)
+library(SeuratData)
+library(MuDataSeurat)
+
+#library(parallel)
+#library(lme4)
+
+#install.packages("Rfast2")
+#BiocManager::install("RcppGSL")
+#library(Rfast2)
+
+#detectCores()
+```
+
+
+
+## Loading data
+
+single-cell:
+
+```{r}
+#Convert("/home/annac/datasets/kidney_10x/kidney_filtered_atac.h5ad", "/home/annac/datasets/kidney_10x/kidney_filtered_atac.h5seurat")
+#atac <- LoadH5Seurat("/home/annac/datasets/kidney_10x/kidney_filtered_atac.h5Seurat")
+
+atac <- ReadH5AD('/home/annac/datasets/kidney_10x/kidney_filtered_atac.h5ad')
+atac
+
+just_matrix_regions <- atac@assays$RNA@counts
+dim(just_matrix_regions)
+```
+
+bulk:
+
+```{r}
+# reading BULK ATAC-seq data
+atac_bulk <- readRDS('/home/annac/datasets/atac_pan_cans/TCGA-ATAC_PanCan_Log2Norm_Counts.rds')
+atac_bulk_raw <- readRDS('/home/annac/datasets/atac_pan_cans/TCGA-ATAC_PanCan_Raw_Counts.rds')
+
+# we should have many NAs in the log norm bc log(0) is NA - NOPE THAT'S FOR SC
+sum(is.na(atac_bulk))
+head(atac_bulk)
+
+# printing annotaions
+```
+
+
+
+
+
+## Calculating statistics for BULK dataset
+
+```{r}
+# inferring cancer types
+cancer_names <- unique(sub("^(.{4}).*", "\\1", names(atac_bulk_raw)[8:length(names(atac_bulk))]))
+# selecting first sample from each cancer
+c_cols<- c()
+for(type in cancer_names){
+  # select samples for one cancer
+  # type <- "BRCA"
+  c_cols <- append(c_cols, grep(type, names(atac_bulk), value = TRUE)[1])
+}
+
+
+# new df to store metrics
+metrics_df <- data.frame(cancer = character(),
+                        sums = numeric(), 
+                        means = numeric(), 
+                        vars = numeric(),
+                        stringsAsFactors = FALSE)
+  
+for(type in cancer_names){
+  # select samples for one cancer
+  # type <- "BRCA"
+  c_cols <- grep(type, names(atac_bulk), value = TRUE)
+  
+  # calculating metrics
+  sums <- colSums(atac_bulk[c_cols])
+  means <- colMeans(atac_bulk[c_cols])
+  vars <- apply(atac_bulk[c_cols], 2, var)
+  
+  new_row <- data.frame(cancer = type, sums = sums, means = means, vars = vars,
+                        stringsAsFactors = FALSE)
+  
+  metrics_df <- rbind(metrics_df, new_row)
+}
+
+# reset row names
+rownames(metrics_df) <- NULL
+```
+
+### Plotting for bulk
+
+```{r}
+# plotting each metrics
+##################### ggplot SCATTERPLOT for mean-var #############################
+
+scatterplot <- ggplot(metrics_df, aes(x = means, y = vars)) + 
+  geom_point() +
+  labs(title="Mean-Variance relationship, Log2Norm bulk ATAC-seq", x = "Mean", y = "Variance") + 
+  theme_minimal()
+
+
+####################### ggplot HISTOGRAM for sum ######################
+
+# Function to extract mean and max values
+get_summary_values <- function(column) {
+  max_value <- max(column)
+  mean_value <- mean(column)
+  return(c(Max = max_value, Mean = mean_value))
+}
+
+# Get summary values for each metric
+sums_summary <- get_summary_values(metrics_df$sums)
+means_summary <- get_summary_values(metrics_df$means)
+vars_summary <- get_summary_values(metrics_df$vars)
+
+# Plot the sums
+plot_sums <- ggplot(metrics_df, aes(x = cancer, y = sums)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Sum of Each Column", x = "Cancer", y = "Sum") +
+  theme_minimal() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  geom_hline(aes(yintercept = sums_summary["Max"]), color = "red", linetype = "dashed", size = 1) +
+  geom_hline(aes(yintercept = sums_summary["Mean"]), color = "blue", linetype = "dashed", size = 1) +
+  geom_text(data = data.frame(cancer = "Sum", y = sums_summary, label = scales::comma(sums_summary)),
+            aes(label = label, y = y + 10), vjust = -0.5, color = "black")
+
+# Plot the means
+plot_means <- ggplot(metrics_df, aes(x = cancer, y = means)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Mean of Each Column", x = "Cancer", y = "Mean") +
+  theme_minimal() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  geom_hline(aes(yintercept = means_summary["Max"]), color = "red", linetype = "dashed", size = 1) +
+  geom_hline(aes(yintercept = means_summary["Mean"]), color = "blue", linetype = "dashed", size = 1) +
+  geom_text(data = data.frame(cancer = "Mean", y = means_summary, label = scales::comma(means_summary)),
+            aes(label = label, y = y + 10), vjust = -0.1, color = "black")
+
+# Plot the variances
+plot_vars <- ggplot(metrics_df, aes(x = cancer, y = vars)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Variance of Each Column", x = "Cancer", y = "Variance") +
+  theme_minimal() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  geom_hline(aes(yintercept = vars_summary["Max"]), color = "red", linetype = "dashed", size = 1) +
+  geom_hline(aes(yintercept = vars_summary["Mean"]), color = "blue", linetype = "dashed", size = 1) +
+  geom_text(data = data.frame(cancer = "Variance", y = vars_summary, label = scales::comma(vars_summary)),
+            aes(label = label, y = y + 0.1), vjust = -0.5, color = "black")
+
+################## VIOLIN PLOTS #########################
+
+# Create violin plots for mean, variance, and sum
+violin_plot_mean <- ggplot(metrics_df, aes(x = cancer, y = means)) +
+  geom_violin(fill = "lightblue") +
+  labs(title = "Mean of region counts for different cancer types, bulk ATAC-seq", x = NULL, y = "Mean") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+violin_plot_var <- ggplot(metrics_df, aes(x = cancer, y = vars)) +
+  geom_violin(fill = "lightgreen") +
+  labs(title = "Variance of region counts for different cancer types, bulk ATAC-seq", x = NULL, y = "Variance") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+violin_plot_sum <- ggplot(metrics_df, aes(x = cancer, y = sums)) +
+  geom_violin(fill = "lightpink") +
+  labs(title = "Total counts for different cancer types, bulk ATAC-seq", x = NULL, y = "Sum") +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+# Display the violin plots
+print(violin_plot_mean)
+print(violin_plot_var)
+print(violin_plot_sum)
+
+```
+
+
+
+
+## Distributions fitting for BULK dataset
+
+Preparations: 
+
+```{r}
+library(fitdistrplus)
+library(MASS)
+library(actuar)
+library(stats)
+library(sfsmisc)
+
+# reading BULK ATAC-seq data
+#type <- 'BRCA'
+#c_cols <- grep(type, names(atac_bulk), value = TRUE)
+# selecting 4 samples of different cancers
+#c_cols<-c("ACCx_025FE5F8_885E_433D_9018_7AE322A92285_X034_S09_L133_B1_T1_PMRG",
+#          "BRCA_000CFD9F_ADDF_4304_9E60_6041549E189C_X017_S06_L011_B1_T1_P040",
+#          "LUAD_31981D14_6717_43C6_B0F3_4D477F637E6F_X036_S09_L042_B1_T2_P095",
+#          "UCEC_417CDB67_1DB1_4399_8591_C4600D65C14C_X026_S05_L061_B1_T1_P069")
+
+brca <- atac_bulk_raw[c_cols]
+#brca <- atac_bulk_raw["ACCx_025FE5F8_885E_433D_9018_7AE322A92285_X034_S09_L133_B1_T1_PMRG"]  #just one test col
+
+# dist fit
+samples <- c_cols
+
+#use this line if you have replicates: 
+#replicates <- rep(LETTERS[1:2], 2)
+#this is for replicates "A" "B" "A" "B". you can modify according to your dataset
+
+#set the distributions you are interested
+#dist.names <- c("Lognormal", "Pareto", "Burr", "Loglogistic", "Weibull", "Gamma")
+dist.names <- c("Lognormal", "Pareto", "Burr", "Loglogistic", "Weibull", "Gamma", "Neg Binom", "Poisson")
+# add Pearson and Negative Binomial
+#dist.names <- c("Neg Binom", "Poisson")
+
+#select colours for each distribution for plotting
+colors <- c(rainbow(8)) #,grey(0.6))
+
+#create an empty list
+sample.list <- list()
+
+#rownames(tpm.df) <- tpm.df$gene_id - they're already correct
+#tpm.df <- tpm.df[-1]
+```
+
+Main fitting loop:
+
+```{r}
+######################################## SET 1 ################
+#you loop over the column names of your df. This will fill the sample.list empty list that you had defined previously with the objects necessary to plot your distribution fitting.    
+fit_all <- function(dataset){
+  sample.list <- list()
+  for (i in 1:ncol(dataset)) {
+    samplei.i<-dataset[,i]
+    samplei.i<-samplei.i[samplei.i>0]
+    ln<-fitdist(samplei.i,"lnorm", discrete = FALSE) 
+    # pareto throws error:
+    # the function mle failed to estimate the parameters, with the error code 100
+    p<-fitdist(samplei.i,"pareto", start = list(shape = 1, scale = 200),lower=c(0,0), discrete = FALSE)
+    #b<-fitdist(samplei.i,"burr",start = list(shape1 = 1, shape2 = 1, rate = 1),lower=c(0,0,0), discrete = FALSE)
+    ll<-fitdist(samplei.i,"llogis",lower=c(0,0), discrete = FALSE)
+    wb<-fitdist(samplei.i,"weibull",lower=c(0,0), discrete = FALSE)
+    g<-fitdist(samplei.i,"gamma",lower=c(0, 0),start=list(scale=1,shape=1), discrete = FALSE)
+    
+    nbinom<-fitdist(samplei.i, "nbinom") #, lower=c(0,0))  # requires integers
+    poisson<-fitdist(samplei.i, "pois") #, lower=c(0,0))
+    #beta<-fitdist(samplei.i, "beta", lower=c(0,0))  # requires values to be in [0, 1]
+    
+    #samplei.i.list<-list(ln,p,b,ll,wb,g,nbinom,poisson)
+    samplei.i.list<-list(ln,p,ll,wb,g,nbinom,poisson)
+    #samplei.i.list<-list(nbinom, poisson)
+    sample.list[[i]] <- samplei.i.list
+  }
+  return(sample.list)
+}
+
+saveRDS(sample.list, file='./temp_data/bulk_rna_seq_alldistr_raw_1sampleeach.RDS')
+```
+
+AIC computation:
+
+```{r}
+
+get_aic_table <- function(data, sample.list, dist.names){
+  # get min from AIC table
+  AIC_df <- as.data.frame(matrix(nrow=ncol(data),ncol=length(dist.names))) # <- CHANGE NCOL!
+  colnames(AIC_df) <- dist.names
+  for(i in 1:ncol(data)){
+    samplei.i.list <- sample.list[[i]]
+    AIC_df[i,] <- gofstat(samplei.i.list)$aic
+  }
+  
+  # for one sample
+  # aic <- gofstat(samplei.i.list)$aic
+  
+  for(i in 1:nrow(AIC_df)){
+    AIC_df$min_AIC[i]<-colnames(AIC_df)[which.min(AIC_df[i,1:length(dist.names)])]  #  <- CHANGE NCOL!
+  }
+  rownames(AIC_df) <- colnames(data)
+  #AIC_df$cutoff_value <- cutoff_val
+  return(AIC_df)
+}
+
+saveRDS(AIC_df, file='./temp_data/AIC_alldistr_raw_1sampleeach.RDS')
+#write.csv(AIC_df, row.names = F, paste0("./temp_data/TableS1_AIC.csv"))
+```
+
+Plotting fitting distributions:
+
+```{r}
+#here you are saving the plots. Make sure to run from png to dev.off() in one go
+png(paste0("./temp_data/cdfcomp_alldistr_raw_1sampleeach5.png"), unit="cm", height=10, width=30, res=1000) #you can modify the unit, height, width and resolution as you see fit
+par(mfrow=c(1,4), mgp=c(5,0.4,0), oma = c (1, 2, 1, 0.5), cex=0.35) # you can modify mfrow to however many plots you need
+# only get the first replicate to plot
+for(i in seq(from = 17, to = 20)){ # by = 2
+  # only get the first replicate to plot
+  samplei.i.list <- sample.list[[i]]
+  if( i %in% c(1) ) {addlegend=T} else{addlegend=F}
+  if(i %in% c(1)) {left_mar=2} else {left_mar=0}       # space for y ticks
+  if(i %in% c(1, 2, 3,4)) {bottom_mar=2} else {bottom_mar=0} # space for x ticks <- CHANGE NUMBERS
+  
+  par(mar=c(2, 2, 2, 0))
+  cdfcomp(samplei.i.list, xlim=c(10^-3,500), addlegend = F, ann=F, fitcol= colors, discrete = FALSE)
+  #cdfcomp(samplei.i.list,xlogscale=TRUE,ylogscale=TRUE,do.points=F,fitcol= colors, #lwd=1,
+   #       ylim=c(10^-3,1),xlim=c(10^-2,10^5), addlegend = F, # addlegend
+   #       ann=F) #main=cell_types[j]
+  title(colnames(brca)[i], line = 0.2)
+  #abline(v= cutoff_val, lty=2)
+  
+  if(i==2) legend("bottomright",bty="n" ,col=colors,legend=dist.names,lty=seq(length(dist.names)))
+  # legend(x=10^0.2, y = 10^-0.7, bty="n",legend=cell_types[i])
+}
+mtext("Cumulative Distribution Function", side = 2, outer = T, cex=0.5) 
+mtext("Fragment counts", side = 1, outer = T, cex=0.5) 
+dev.off()
+```
+
+Plotting QQ-plot:
+
+```{r}
+png(paste0("./temp_data/qq_allDist_raw_1sampleEach/qq_alldistr_raw_1sampleeach1.png"), unit="cm", height=10, width=30, res=1000)
+par(mfrow=c(1,4), mgp=c(5,0.4,0), oma = c (1, 2, 1, 0.5), cex=0.35)  #bottom, left, top, right #location of label, tick mark label, tick mark
+for (i in seq(from = 1, to = 4)) {  
+  samplei.i.list <- sample.list[[i]]
+  if( i %in% c(1) ) {addlegend=T} else{addlegend=F}
+  if(i %in% c(1)) {left_mar=2} else {left_mar=0}       # space for y ticks
+  if(i %in% c(2,4,6,8,10,12)) {bottom_mar=2} else {bottom_mar=0} # space for x ticks
+  
+  par(mar=c(2, 2, 2, 0))
+  qqcomp(samplei.i.list, xlim=c(10^-1,500), ylim=c(10^-1,500),
+         fitpch=20, fitcol=colors ,addlegend = F, main=cell_types[j], ann=FALSE) #, fitpch="."
+  title(colnames(brca)[i], line = 0.2)
+  # if(i %% 2 == 1) eaxis(side=2, at = c(10^-2, 1, 10^2, 10^4, 10^6), cex=0.8)
+  # if(i %in% c(3,4)) eaxis(side=1, at = c( 10^-2, 1, 10^2, 10^4, 10^6), cex=0.8)
+  abline(v=3, lty=2)
+  if(i==1) legend("bottomright",bty="n",col=colors,legend=dist.names,lty=seq(length(dist.names)))
+  
+  # legend(x=10^-1.5, y=10^4.3,bty="n",legend=paste0("rep. ", replicates[i],"\n",samples[i]))
+}
+mtext("Empirical quantiles", side = 2, outer = T, cex=0.5)
+mtext("Theoretical quantiles", side = 1, outer = T, cex=0.5)
+dev.off()
+```
+
+
+
+
+## Plotting separately different types of regions
+
+Pie chart:
+
+```{r}
+unique(atac_bulk['annotation'])
+ann_counts <- table(atac_bulk['annotation'])
+
+pie(ann_counts, labels = paste(names(ann_counts), "(", round(100*ann_counts/sum(ann_counts), 1), "%)", sep=""), col=rainbow(length(ann_counts)))
+```
+
+Distribution fitting and plotting:
+
+```{r}
+library(dplyr)
+library(fitdistrplus)
+library(MASS)
+library(actuar)
+library(stats)
+library(sfsmisc)
+
+
+type <- 'BRCA'
+c_cols <- grep(type, names(atac_bulk_raw), value = TRUE)
+
+# promotors
+atac_raw_prom <- filter(atac_bulk_raw, annotation == "Promoter")
+brca_prom <- atac_raw_prom[c_cols]
+
+# distal
+atac_raw_dist <- filter(atac_bulk_raw, annotation == "Distal")
+brca_dist <- atac_raw_dist[c_cols]
+
+# others
+atac_raw_intr_ex <- filter(atac_bulk_raw, annotation != "Distal" & annotation != "Promoter")
+brca_intr_ex <- atac_raw_intr_ex[c_cols]
+
+# setting up aes stuff
+samples <- c_cols
+dist.names <- c("Lognormal", "Pareto", "Loglogistic", "Weibull", "Gamma", "Neg Binom", "Poisson")
+colors <- c(rainbow(8)) #,grey(0.6))
+
+# fitting the distributions
+fitted_prom <- fit_all(brca_prom)
+saveRDS(fitted_prom, file='./temp_data/fit_distr_brca_prom.RDS')
+
+fitted_dist <- fit_all(brca_dist)
+saveRDS(fitted_dist, file='./temp_data/fit_distr_brca_dist.RDS')
+
+fitted_int_ex <- fit_all(brca_intr_ex)
+saveRDS(fitted_int_ex, file='./temp_data/fit_distr_brca_int_ex.RDS')
+
+############## cdf plots ###############
+png(paste0("./temp_data/cdfcomp_brca1_promotors2.png"), unit="cm", height=20, width=20, res=1000) #you can modify the unit, height, width and resolution as you see fit
+cdfcomp(fitted_prom[[1]], xlim=c(10^-3,500), discrete = FALSE)
+dev.off()
+
+png(paste0("./temp_data/cdfcomp_brca1_distal_elems2.png"), unit="cm", height=20, width=20, res=1000) #you can modify the unit, height, width and resolution as you see fit
+cdfcomp(fitted_dist[[1]], xlim=c(10^-3,500), discrete = FALSE)
+dev.off()
+
+png(paste0("./temp_data/cdfcomp_brca1_int_ex2.png"), unit="cm", height=20, width=20, res=1000) #you can modify the unit, height, width and resolution as you see fit
+cdfcomp(fitted_int_ex[[1]], xlim=c(10^-3,500), discrete = FALSE)
+dev.off()
+
+############# AIC ##############
+
+aic_prom <- get_aic_table(brca_prom, fitted_prom, dist.names)
+saveRDS(aic_prom, file='./temp_data/aic_brca_prom.RDS')
+
+aic_dist <- get_aic_table(brca_dist, fitted_dist, dist.names)
+saveRDS(aic_dist, file='./temp_data/aic_brca_dist.RDS')
+
+gr <- group_by(aic_dist, by=min_AIC)
+summarize(gr, n=n())
+```
+
+
+
+## Enthropy
+
+```{r}
+length(just_matrix[, 1]) # cell 1 all regions
+length(just_matrix[1, ]) # region 1 all cells
+
+# creating lists for entropy for cells and 
+regions_entr <- vector("numeric", 67150)
+cells_entr <- vector("numeric", 12721)
+
+# empirical estimate of entropy
+entropy.empirical(just_matrix[1, ])
+
+# loop over all regions --> writing result to the matrix
+# 1. Cycle
+#for(region in seq(1, 67150)){
+#  regions_entr[region] <- entropy.empirical(just_matrix_regions[, region])
+#}
+
+# 2. lapply
+# lapply(just_matrix_regions, entropy.empirical)
+
+# 3. lapply parallel version 
+entr_regions <- mclapply(just_matrix_regions, entropy.empirical)
+
+
+# loop over all cells --> writing result to the matrix
+# 1. Cycle
+#for(cell in seq(1, 12721)){
+#  cells_entr[cell] <- entropy.empirical(just_matrix_regions[cell, ])
+#}
+```
+
+
+
+## Pearson correlation  
+
+You can also embed plots, for example:
+
+```{r}
+# create empty matrix 67150 x 67150 for pairwise regions comparison
+mat_regions = vector(length = 2254561250, mode = 'numeric')
+?vector
+
+# create empty matrix 12721 x 12721 for pairwise cells comparison
+mat_cells = matrix(, nrow = 12721, ncol = 12721)
+
+# loop over all regions --> writing result to the matrix
+for(reg_a in seq(1, 67150)){
+  for(reg_b in seq(1, 67150)){
+    mat_regions[reg_a, reg_b] <- cor(just_matrix[reg_a, ], just_matrix[reg_b,], method = c("pearson"))
+    }
+}
+
+# loop over all cells --> writing result to the matrix
+for(cell_a in seq(1, 12721)){
+  for(cell_b in seq(1, 12721)){
+    mat_cells[cell_a, cell_b] <- person(just_matrix[, cell_b], just_matrix[, cell_b])
+    }
+}
+```
+
+
+
+
+

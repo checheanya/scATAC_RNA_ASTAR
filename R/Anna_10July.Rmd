@@ -1,0 +1,219 @@
+---
+title: "Anna_10July"
+author: "Olga Sirbu"
+date: "2023-07-10"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##1. Distribution fitting
+```{r}
+#load the necessary packages. If not available, then use install.packages() function
+library(fitdistrplus)
+library(MASS)
+library(actuar)
+library(stats)
+library(sfsmisc)
+
+col_slt <- c("patient_A.P_FPKM", "patient_B.P_FPKM", "patient_A.E_FPKM", "patient_B.E_FPKM")
+
+##if your data is in fpkm, and you need tpm you can use fpkm2tpm function: 
+
+fpkm2tpm <- function(fpkm) {
+  return (1e6*fpkm/sum(fpkm))
+}
+##if your data is in rpkm, and you need tpm you can use rpkm2tpm function: 
+rpkm2tpm <- function(x) {
+  x <- as.matrix(x)
+  return(t(t(x)/colSums(x))*10^6)
+}
+
+##convert to tpm
+df_tpm <- apply(df_fpkm[,col_slt], MARGIN = 2, fpkm2tpm )
+
+#line below is optional, i need to edit the column names from "patient_A.P_FPKM" to "patient_A.P":
+
+#colnames(df_tpm) <- sapply(col_slt, function(x) substr(x, start = 1, stop = nchar(x)-5 ) )
+head(df_tpm)
+
+dim(df_tpm)
+
+# dist fit
+tpm.df <- df_tpm #
+samples <- col_slt 
+
+#use this line if you have replicates: 
+replicates <- rep(LETTERS[1:2], 2)
+#this is for replicates "A" "B" "A" "B". you can modify according to your dataset
+
+#set the distributions you are interested
+dist.names <- c("Lognormal", "Pareto", "Burr", "Loglogistic", "Weibull", "Gamma")
+
+#select colours for each distribution for plotting
+colors <- c(rainbow(5),grey(0.6))
+
+#create an empty list
+sample.list <- list()
+
+rownames(tpm.df) <- tpm.df$gene_id
+tpm.df <- tpm.df[-1]
+
+#you loop over the column names of your df. This will fill the sample.list empty list that you had defined previously with the objects necessary to plot your distribution fitting.
+for (i in 1:ncol(tpm.df)) {
+  samplei.i<-tpm.df[,i]
+  samplei.i<-samplei.i[samplei.i>0]
+  ln<-fitdist(samplei.i,"lnorm")
+  p<-fitdist(samplei.i,"pareto",start = list(shape = 1, scale = 200),lower=c(0,0))
+  b<-fitdist(samplei.i,"burr",start = list(shape1 = 1, shape2 = 1, rate = 1),lower=c(0,0,0))
+  ll<-fitdist(samplei.i,"llogis",lower=c(0,0))
+  wb<-fitdist(samplei.i,"weibull",lower=c(0,0))
+  g<-fitdist(samplei.i,"gamma",lower=c(0, 0),start=list(scale=1,shape=1))
+  
+  samplei.i.list<-list(ln,p,b,ll,wb,g)
+  sample.list[[i]] <- samplei.i.list
+}
+
+# get min from AIC table
+AIC_df <- as.data.frame(matrix(nrow=ncol(tpm.df),ncol=6))
+colnames(AIC_df) <- dist.names
+for(i in 1:ncol(tpm.df)){
+  samplei.i.list <- sample.list[[i]]
+  AIC_df[i,] <- gofstat(samplei.i.list)$aic
+}
+
+for(i in 1:nrow(AIC_df)){
+  AIC_df$min_AIC[i]<-colnames(AIC_df)[which.min(AIC_df[i,1:6])]
+}
+rownames(AIC_df) <- colnames(tpm.df)
+AIC_df$cutoff_value <- cutoff_val
+
+
+#here you are saving the plots. Make sure to run from png to dev.off() in one go
+png(paste0("./data/ovarian_cancer/distfit/FS1a_cdfcomp.png"), unit="cm", height=5, width=6, res=300) #you can modify the unit, height, width and resolution as you see fit
+par(mfrow=c(2,2), mgp=c(5,0.4,0), oma = c (1, 2, 1, 0.5), cex=0.35) # you can modify mfrow to however many plots you need
+# only get the first replicate to plot
+for(i in seq_along(sample.list)){
+  # only get the first replicate to plot
+  samplei.i.list <- sample.list[[i]]
+  if( i %in% c(1) ) {addlegend=T} else{addlegend=F}
+  if(i %in% c(1,2)) {left_mar=2} else {left_mar=0}       # space for y ticks
+  if(i %in% c(2,4)) {bottom_mar=2} else {bottom_mar=0} # space for x ticks
+  
+  par(mar=c(2, 2, 2, 0))
+  cdfcomp(samplei.i.list,xlogscale=TRUE,ylogscale=TRUE,do.points=F,fitcol=colors, #lwd=1,
+          ylim=c(10^-3,1),xlim=c(10^-2,10^5), addlegend = F, # addlegend
+          ann=F) #main=cell_types[j]
+  title(colnames(df_tpm)[i], line = 0.2)
+  abline(v= cutoff_val, lty=2)
+  
+  if(i==1) legend("bottomright",bty="n" ,col=colors,legend=dist.names,lty=seq(length(dist.names)))
+  # legend(x=10^0.2, y = 10^-0.7, bty="n",legend=cell_types[i])
+}
+mtext("Cumulative Distribution Function", side = 2, outer = T, cex=0.5) 
+mtext("TPM", side = 1, outer = T, cex=0.5) 
+dev.off()
+
+png(paste0("./data/ovarian_cancer/distfit/FS1b_qq.png"), unit="cm", height=5, width=6, res=300)
+par(mfrow=c(2,2), mgp=c(5,0.4,0), oma = c (1, 2, 1, 0.5), cex=0.35)  #bottom, left, top, right #location of label, tick mark label, tick mark
+for (i in 1:ncol(tpm.df)) {  
+  samplei.i.list <- sample.list[[i]]
+  if( i %in% c(1) ) {addlegend=T} else{addlegend=F}
+  if(i %in% c(1,2)) {left_mar=2} else {left_mar=0}       # space for y ticks
+  if(i %in% c(2,4)) {bottom_mar=2} else {bottom_mar=0} # space for x ticks
+  
+   par(mar=c(2, 2, 2, 0))
+  qqcomp(samplei.i.list, xlogscale=TRUE, ylogscale=TRUE, xlim=c(10^-1,10^3), ylim=c(10^-1,10^4),
+         fitpch=20, fitcol=colors ,addlegend = F, main=cell_types[j], ann=FALSE) #, fitpch="."
+  title(colnames(df_tpm)[i], line = 0.2)
+  # if(i %% 2 == 1) eaxis(side=2, at = c(10^-2, 1, 10^2, 10^4, 10^6), cex=0.8)
+  # if(i %in% c(3,4)) eaxis(side=1, at = c( 10^-2, 1, 10^2, 10^4, 10^6), cex=0.8)
+  abline(v=3, lty=2)
+  if(i==1) legend("bottomright",bty="n" ,col=colors,legend=dist.names,lty=seq(length(dist.names)))
+  
+  # legend(x=10^-1.5, y=10^4.3,bty="n",legend=paste0("rep. ", replicates[i],"\n",samples[i]))
+}
+mtext("Empirical quantiles", side = 2, outer = T, cex=0.5)
+mtext("Theoretical quantiles", side = 1, outer = T, cex=0.5)
+dev.off()
+
+write.csv(AIC_df, row.names = F, paste0("./data/ovarian_cancer/distfit/TableS1_AIC.csv"))
+
+```
+
+
+
+##2. Noise
+```{r}
+#function for calculating noise
+SQCO <- function(MT){
+  #### INPUT: matrix of gene expression, rows = genes, column = repeats of 1 genotype
+  n_genes <- dim(MT)[1]
+  n_samples <- dim(MT)[2]
+  SQCO1 <- matrix(nrow = nrow(MT), ncol = (n_samples*(n_samples-1)/2)) # to store variance values
+  rownames(SQCO1) <- rownames(MT)
+  cc <- combn(x=1:n_samples,m=2)  # every possible pairs of samples
+  
+  # create a table of variance across difference repeats for each genes
+  for (i in 1:nrow(MT)){
+    for (j in 1:ncol(cc) ) {
+      cc_j <- cc[,j]
+      # cat(cc_j,"\n")
+      SQCO1[i,j] <- 2*((MT[i,cc_j[1]] - MT[i,cc_j[2]])^2)/((MT[i,cc_j[1]] + MT[i,cc_j[2]])^2)  
+      ## expression noise of ith gene in each pair of cell
+    }
+  }
+  
+  # SQCO1[is.nan(SQCO1)] <- 0
+  SQCO1 <- SQCO1[complete.cases(SQCO1), ]
+  if(!is.matrix(SQCO1)){
+    SQCO1 <- as.matrix(SQCO1, ncol=1)
+  }
+  
+  # noise across difference repeats of each gene
+  SQCO1.1 <- matrix(nrow = nrow(SQCO1), ncol = 1)
+  for (i in 1:nrow(SQCO1)) {
+    SQCO1.1[i,1] <- 2*sum(SQCO1[i,])/(ncol(MT)*(ncol(MT)-1))
+    ## pairwise noise of ith gene
+  }
+  
+  #noise of the data set: across all repeats, across all genes
+  SQCO1.2 <- matrix(sum(SQCO1.1)/nrow(SQCO1.1))
+  return(SQCO1.2)
+}
+
+```
+
+
+##3. Entropy
+```{r}
+computeBin <- function(arr) { # Doane's rule
+  n <- length(arr)
+  gx <- moments::skewness(arr)
+  sigmag <- sqrt(6 * (n - 2) / ((n + 1) * n + 3))
+  bin <- 1 + log2(n) + log2(1 + abs(gx) / sigmag)
+  return(bin)
+}
+
+getBinCounts <- function(arr) {
+  bins <-computeBin(arr)
+  vec <- entropy::discretize(arr, computeBin(arr), r = range(arr))
+  return(vec)
+  }
+
+entropyAvg <- function(mt){
+  # mt has to be numeric vector
+  entropy.vector <- NULL
+  for(i in 1:ncol(mt)){
+    binCount <- getBinCounts(mt[, i])
+    entropy <- entropy::entropy.empirical(binCount, unit = "log2")
+    entropy.vector <- c(entropy.vector, entropy)
+  }
+  return(mean(entropy.vector))
+}
+#Entropy Avg is the function you use. getbincounts and compute bin are helping functions
+```
+
+

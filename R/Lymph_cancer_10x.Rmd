@@ -22,7 +22,7 @@ library(ggplot2)
 library(cowplot)
 ```
 
-## Data
+# Data
 
 Reading the data
 TODO: both for raw and filtered, what are the steps to get filtered?
@@ -39,7 +39,11 @@ metadata <- read.csv(
   row.names = 1
 )
 
+counts
+
 ```
+
+# scATAC-seq modality analysis
 
 Creating the Seurat object and annotating the data. 
 Selecting scATAC subset
@@ -84,9 +88,15 @@ lymph <- NucleosomeSignal(lymph)
 lymph <- TSSEnrichment(lymph, fast=FALSE)
 
 # add blacklist ratio and fraction of reads in peaks
+# blacklist fragments - have high expression in many NGS experiments
 #lymph$pct_reads_in_peaks <- lymph$atac_peak_region_fragments / lymph$passed_filters * 100
 #lymph$blacklist_ratio <- lymph$blacklist_region_fragments / lymph$peak_region_fragments
 ```
+
+```{r}
+lymph[[]]
+```
+
 
 ```{r}
 saveRDS(lymph, file='./temp_data/lymph_f_nf_annotated_withQC.RDS')
@@ -148,6 +158,32 @@ lymph <- subset(
     TSS.enrichment > 1
 )
 lymph
+
+
+# or do this based on quantiles
+
+#low_prf <- quantile(lymph[["peak_region_fragments"]]$peak_region_fragments, probs = 0.02) 
+#hig_prf <- quantile(lymph[["peak_region_fragments"]]$peak_region_fragments, probs = 0.98) 
+
+#low_prp <- quantile(lymph[["pct_reads_in_peaks"]]$pct_reads_in_peaks, probs = 0.02)
+
+#high_ns <- quantile(lymph[["blacklist_ratio"]]$blacklist_ratio, probs = 0.98) 
+
+#high_ns <- quantile(lymph[["nucleosome_signal"]]$nucleosome_signal, probs = 0.98) 
+
+#low_prf <- quantile(lymph[["TSS.enrichment"]]$TSS.enrichment, probs = 0.02) 
+
+#data <- subset(
+#  x = data, 
+#  subset = peak_region_fragments > low_prf &
+#    peak_region_fragments < hig_prf &
+#    pct_reads_in_peaks > low_prp &
+#    blacklist_ratio < high_blr &
+#    nucleosome_signal < hig_ns &
+#    TSS.enrichment > low_ts
+#)
+
+
 ```
 
 ```{r}
@@ -173,7 +209,7 @@ VlnPlot(
 )
 ```
 
-## Normalisation 
+## Normalization 
 
 CHECK HOW THEY ALL WORK!!!
 
@@ -185,7 +221,9 @@ lymph <- RunTFIDF(lymph)
 
 Then we do feature selection - selecting top n% features, we can set then by q = percent to remove.
 Features used for dimensional reduction are automatically set as VariableFeatures() for the Seurat object by this function.
-Here we will use all????
+Here we will use all
+
+based on what we're selecting, alg??
 
 ```{r}
 lymph <- FindTopFeatures(lymph, min.cutoff = 'q0')
@@ -208,13 +246,67 @@ DepthCor(lymph)
 saveRDS(lymph, file='./temp_data/lymph_f_nf_withPCA.RDS')
 
 lymph <- readRDS("./temp_data/lymph_f_nf_withPCA.RDS")
+
+lymph
+lymph[[]]
+DefaultAssay(lymph) <- "ATAC"
 ```
+
+## Dim reduction
+
+First component is highly correlated with everything, so we're taking from 2nd
+what alg 3 stands for?
+
+```{r}
+lymph <- RunUMAP(object = lymph, reduction = 'lsi', dims=2:30)
+lymph <- FindNeighbors(object = lymph, reduction = 'lsi', dims = 2:30)
+lymph <- FindClusters(object = lymph, verbose = FALSE, algorithm = 3)
+DimPlot(object = lymph, label = TRUE) + NoLegend()
+```
+## Gene activity
+
+calculate gene activity based on chromatin accesebility
+--> we can compare this to gene expression
+what's behind this function???
+
+```{r}
+gene.activities <- GeneActivity(lymph)
+```
+
+
+
+```{r}
+lymph[['gene_acc']] <- CreateAssayObject(counts = gene.activities)
+```
+
+Then we can normalize that:
+
+```{r}
+lymph <- NormalizeData(
+  object = lymph, 
+  assay = 'gene_acc', 
+  normalization.method = 'LogNormalize', 
+  scale.factor = median(lymph$nCount_RNA)
+)
+
+lymph[["gene_acc"]]
+lymph[[]]
+```
+
+
+# scRNA-seq modality analysis
+
+
+
+```{r}
+DefaultAssay(lymph) <- 'RNA'
+```
+
+
 
 ## Peak calling 
 
 ```{r}
-
-
 # call peaks using MACS2
 peaks <- CallPeaks(lymph, macs2.path = '/home/annac/mambaforge/bin/macs2')
 
@@ -237,36 +329,62 @@ lymph[["peaks"]] <- CreateChromatinAssay(
 )
 ```
 
-
+If we have different cell states/conditions/clusters, we can do differential peak calling:
 
 ```{r}
+DefaultAssay(lymph) <- 'ATAC'
 
+da_peaks <- FindMarkers(
+  object = lymph, 
+  ident.1 = rownames(lymph[[]][lymph$seurat_clusters == '0',]), # USE CLUSTER OR CONDITION COL
+  ident.2 = rownames(lymph[[]][lymph$seurat_clusters == '8',]),
+  min.pct = 0.05, 
+  test.use = 'LR',
+  latent.vars = 'atac_peak_region_fragments'
+)
+
+da_peaks[[]]
+```
+
+For now it's just regions, but we can find out the closest gene to each peak - 
+this function is adding the gene name column and distance to this gene. It's also calculating p-vals 
+
+```{r}
+da_peaks$distance <- ClosestFeature(lymph, regions = rownames(da_peaks))$gene_name
+da_peaks$genes <- ClosestFeature(lymph, regions = rownames(da_peaks))$distance
+da_peaks
+```
+
+Plotting the distr:
+
+```{r}
+CoveragePlot(
+  object = lymph, 
+  region = rownames(da_peaks)[1], # see [1], then [2] and so on
+  extend.upstream = 10000,
+  extend.downstream = 5000,
+  group.by = 'seurat.cluster' # CLUSTERING COLUMN
+)
+```
+
+```{r}
+plot1 <- VlnPlot(
+  object = data, 
+  features = rownames(da_peaks)[1], # see [1], then [2] and so on
+  group.by = 'dataset' # CLUSTERING COLUMN
+)
+
+plot2 <- FeaturePlot(
+  object = data, 
+  features = rownames(da_peaks)[1], # see [1], then [2] and so on
+  max.cutoff = 'q95' # CLUSTERING COLUMN
+)
+
+plot1 | plot2
 ```
 
 
-```{r}
-
-```
 
 
-```{r}
 
-```
-
-
-```{r}
-
-```
-
-```{r}
-
-```
-
-```{r}
-
-```
-
-```{r}
-
-```
 
