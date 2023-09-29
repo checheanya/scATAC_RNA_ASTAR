@@ -60,6 +60,8 @@ kidney
 ```
 ```{r}
 saveRDS(kidney, file='./temp_data/kidney_f_nf_annotated.RDS')
+
+
 ```
 
 ## Quality control
@@ -120,17 +122,23 @@ VlnPlot(
 Filtering out low quality cells and genes. Here we are selecting constants based on the distributions above:
 
 ```{r}
+kidney <- readRDS("./temp_data/kidney_f_nf_annotated_withQC.RDS")
+DefaultAssay(kidney) <- 'ATAC'
+
 # filter out low quality cells
 kidney <- subset(
   x = kidney,
-  subset = nCount_ATAC < 100000 &
-    nCount_RNA < 25000 &
-    nCount_ATAC > 1000 &
-    nCount_RNA > 1000 &
-    nucleosome_signal < 2 &
-    TSS.enrichment > 1
+  subset = nCount_ATAC <= 40000 &
+    #nCount_RNA < 25000 &
+    nCount_ATAC >= 4000 &
+    nFeature_ATAC >= 2000 &
+    nFeature_ATAC <= 15000
+    #nCount_RNA > 1000 &
+    #nucleosome_signal < 2 &
+    #TSS.enrichment > 1
 )
-kidney
+
+saveRDS(kidney, file='./temp_data/kidney_filtered_as_scanpy.RDS')
 ```
 
 Checking the distributions of all metrics again:
@@ -144,9 +152,18 @@ VlnPlot(
 )
 ```
 
+```{r}
+saveRDS(kidney, file='./temp_data/kidney_annotated_withQC_filtered.RDS')
+```
+
 ## Normalisation 
 
-CHECK HOW THEY ALL WORK!!!
+```{r}
+kidney <- readRDS("./temp_data/kidney_annotated_withQC_filtered.RDS")
+```
+
+
+### TF-IDF + LSI
 
 Signac performs term frequency-inverse document frequency (TF-IDF) normalization. This is a two-step normalization procedure, that both normalizes across cells to correct for differences in cellular sequencing depth, and across peaks to give higher values to more rare peaks. FORMULA??
 
@@ -175,7 +192,38 @@ Correlation between components:
 DepthCor(kidney)
 ```
 
+UMAP:
 
+```{r}
+kidney <- RunUMAP(object = kidney, reduction = 'lsi', dims=2:30)
+kidney <- FindNeighbors(object = kidney, reduction = 'lsi', dims = 2:30)
+kidney <- FindClusters(object = kidney, verbose = FALSE)
+DimPlot(kidney, label = TRUE) + NoLegend()
+
+saveRDS(kidney[['seurat_clusters']], file='./temp_data/clusters_lsi')
+```
+
+### Not normalized
+
+
+### LOg norm
+
+```{r}
+DefaultAssay(kidney) <- "ATAC"
+kidney <- NormalizeData(kidney, normalization.method = "LogNormalize",
+                           assay = 'ATAC',
+                           scale.factor = 10000)
+
+kidney <- FindTopFeatures(kidney, min.cutoff = 'q0')
+kidney <- RunSVD(kidney)
+
+kidney <- RunUMAP(object = kidney, reduction = 'lsi', dims=2:30)
+kidney <- FindNeighbors(object = kidney, dims = 2:30)
+kidney <- FindClusters(object = kidney, verbose = FALSE)
+DimPlot(kidney, label = TRUE) + NoLegend()
+
+saveRDS(kidney[['seurat_clusters']], file='./temp_data/clusters_log_norm.RDS')
+```
 
 ## Peak calling 
 

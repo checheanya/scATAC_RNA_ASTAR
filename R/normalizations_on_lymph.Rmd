@@ -1,0 +1,185 @@
+---
+title: "Normalizations_on_lymph"
+output: html_document
+date: "2023-07-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Data loading
+
+```{r}
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(hdf5r)
+library(Signac)
+library(EnsDb.Hsapiens.v86)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(ggplot2)
+library(cowplot)
+```
+
+Loading already filtered data with annotation and TSS and NS scores:
+
+```{r}
+setwd("~/R_scripts")
+lymph <- readRDS("./temp_data/lymph_f_nf_annotated_withQC_filtered.RDS")
+lymph
+```
+
+Leaving only ATAC data:
+
+```{r}
+DefaultAssay(lymph) <- 'ATAC'
+```
+
+
+## Applying different normalizations
+
+Signac/Seurat:
+
+```{r}
+# 1 frequency-inverse document frequency (TF-IDF)
+lymph_tfidf <- RunTFIDF(lymph, assay = 'ATAC')
+
+# 2 simple log norm
+lymph_log <- NormalizeData(lymph, normalization.method = "LogNormalize",
+                           assay = 'ATAC',
+                           scale.factor = 10000)
+
+# 3 centered log ratio transformation
+#lymph_clr <- NormalizeData(lymph_atac, normalization.method = "CLR",
+ #                          assay = 'ATAC')
+
+# 4 CPM
+#lymph_cpm <- NormalizeData(lymph_atac, normalization.method = "RC", scale.factor = 1e6)
+
+# 5 sctransform - only for scRNA-seq apparently
+#lymph_sctransf <- SCTransform(lymph, assay = 'ATAC', method = "glmGamPoi", verbose = FALSE)
+```
+
+## Other normalizations
+
+from ArchR:
+
+```{r}
+
+bin <- BinarizeCounts(lymph, assay = 'ATAC')
+bin[[]]
+```
+
+
+List from here: https://www.10xgenomics.com/resources/analysis-guides/single-cell-rna-seq-data-normalization 
+
+SCnorm:
+
+```{r}
+library(SCnorm)
+
+```
+
+BASICS:
+
+```{r}
+
+```
+
+Scran:
+
+```{r}
+
+```
+
+Scran:
+
+```{r}
+
+```
+
+Linnorm:
+
+```{r}
+
+```
+
+PsiNorm:
+
+```{r}
+
+```
+
+## Dimentionality reduction
+
+```{r}
+# 1 single value decomposition
+lymph_tfidf <- FindTopFeatures(lymph_tfidf, min.cutoff = 'q0', assay = 'ATAC')
+lymph_tfidf <- RunSVD(lymph_tfidf, assay = 'ATAC')
+
+DefaultAssay(lymph) <- 'ATAC'
+DefaultAssay(lymph_tfidf) <- 'ATAC'
+DefaultAssay(lymph_log) <- 'ATAC'
+
+
+lymph <- FindTopFeatures(lymph, min.cutoff = 'q0')
+lymph <- ScaleData(lymph, verbose = FALSE)
+
+# 2 PCA
+lymph <- RunPCA(lymph, assay = 'ATAC', verbose = FALSE)
+lymph_log <- RunPCA(lymph_log, assay = 'ATAC', verbose = FALSE)
+```
+
+## Clustering
+
+```{r}
+# 1 single value decomposition
+
+
+# 2 
+
+
+```
+
+
+## UMAP with everything
+
+plot for LSE trf:
+
+```{r}
+lymph_tfidf <- RunUMAP(object = lymph_tfidf, reduction = 'lsi', dims=2:30)
+lymph_tfidf <- FindNeighbors(object = lymph_tfidf, reduction = 'lsi', dims = 2:30)
+lymph_tfidf <- FindClusters(object = lymph_tfidf, verbose = FALSE)
+DimPlot(lymph_tfidf, label = TRUE) + NoLegend()
+```
+
+plot for other norms:
+
+```{r}
+all_sets <- c(lymph_atac, lymph_sctransf, lymph_clr, lymph_log)
+
+for(data in all_sets){
+  DefaultAssay(data) <- 'ATAC'
+  data <- 
+  data <- RunPCA(data, verbose = FALSE)
+  data <- RunUMAP(object = data, dims=2:30)
+  data <- FindNeighbors(object = data, dims = 2:30)
+  data <- FindClusters(object = data, verbose = FALSE)
+  DimPlot(data, label = TRUE) + NoLegend()
+}
+```
+
+## tSNE with everything
+
+
+```{r}
+# 1 single value decomposition
+lymph <- RunSVD(lymph)
+
+# 2 
+
+
+```
+
+
