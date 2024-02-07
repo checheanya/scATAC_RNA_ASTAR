@@ -1,0 +1,1022 @@
+---
+title: "Omics techniques - ATAC-Seq HandsOn"
+date: "14/06/2023"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+# Outline
+
+In this session we will show how to analyze ATAC-seq data and also how to complement this analysis with external RNA-seq data. We thus will use two data sets containing information of on this two different modalities.
+
+Data from scATAC-seq belongs to a 8-week old mouse from 17 samples spanning 13 different tissues and was obtained from Cusanovich et al. 2018. The original article can be found here: <https://pubmed.ncbi.nlm.nih.gov/30078704/>
+
+
+We will select a subset of tissues, and we will use the object class Seurat to hold the information and perform computations, as well as libraries suited to work with this data class.
+
+All data needed is available at: <https://drive.google.com/drive/folders/1UMdqwDP4OS6QYEWD5XSh_vOUymwTFkLv?usp=sharing>
+
+We will focus on the processing and distillation of results from the ATAC-Seq data set. The main goals pursuit in this demonstration are (1) clustering and identification of cell types, (2) motif enrichment analysis, and (3) identification of marker genes.
+
+# Set-up
+
+```{r setup, results='hide', warning=FALSE, message=FALSE}
+# DIRECTORIES
+wd <- setwd("//wsl.localhost/Ubuntu-18.04/home/anna/ESCI/Omics/scATAC-seq") ## Change to the directory you downloaded the data
+datadir <- paste0(wd, '/INPUT_DATA/')
+resultsdir <- paste0(wd, '/RESULTS/')
+
+# DOC OPTIONS
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = wd) # https://bookdown.org/yihui/rmarkdown-cookbook/working-directory.html
+
+# LIBRARIES
+library(Seurat)
+library(Signac)
+
+library(dplyr)
+library(Matrix)
+library(stringr)
+library(readr)
+
+library(ggplot2)
+
+if (!('keep' %in% ls())) { keep <- c('keep', 'atac', 'rna', ls()) }
+
+```
+
+# ATAC-Seq pre-processing
+
+### Step 1: Data loading
+
+Load the matrix of counts, the metadata file, and the fragment files, already filtered for selected tissues.
+
+```{r, eval=FALSE}
+# Counts
+counts.fname <- paste0(datadir, "atac_matrix.binary.qc_filtered.FINAL.rds")
+counts <- readRDS(file = counts.fname)
+
+# Metadata
+metadata.fname <- paste0(datadir, "cell_metadata.FINAL_noLabel.rds")
+metadata <- readRDS(file = metadata.fname)
+```
+
+Counts matrix contains reads mapping in peaks. But we will also need the fragments for each cell genome-wide. This are heavy objects that we will efficiently stored in the disk.
+
+```{r, eval=FALSE}
+
+# Bed files generated from .bam files downloaded from https://atlas.gs.washington.edu/mouse-atac/data/ ,
+# using the sinto package, which also generates the tabix index files.
+
+spleen_fragments<-CreateFragmentObject(paste0(datadir, "spleen_fragments.filt.bed.gz"))
+
+kidney_fragments<-CreateFragmentObject(paste0(datadir, "kidney_fragments.filt.bed.gz"))
+
+liver_fragments<-CreateFragmentObject(paste0(datadir, "liver_fragments.filt.bed.gz"))
+
+wholebrain_fragments<-CreateFragmentObject(paste0(datadir, "wholebrain_fragments.filt.bed.gz"))
+
+
+```
+
+### Step 2. Creating the Seurat object from tissue information
+
+Filter the count matrix for each tissue. Create the seurat object, as a chromatin assay. Merge the seurat objects of each tissue into one single object.
+
+```{r, eval=FALSE}
+
+# Function to create the Seurat object for the given tissue
+create_tissue_object<- function(tissue,tissue_fragments) {
+  
+  metadata_tissue <- metadata[metadata$tissue %in% c(tissue), ]
+  counts_tissue <- counts[, rownames(x = metadata_tissue)]
+  
+  chrom_assay_tissue <- CreateChromatinAssay(
+    counts = counts_tissue,
+    sep = c("_", "_"),
+    fragments = c(tissue_fragments),
+    genome = 'mm9',
+    min.cells = 10,
+    min.features = 200
+  )
+  rm(counts_tissue)
+
+  atac_tissue <- CreateSeuratObject(
+    counts = chrom_assay_tissue,
+    assay = "peaks",
+    meta.data = metadata_tissue
+  )
+  rm(chrom_assay_tissue)
+  
+  return(atac_tissue)
+}
+
+# Create Tissue object for the selected tissues
+atac_spleen<-create_tissue_object("Spleen",spleen_fragments)
+atac_kidney<-create_tissue_object("Kidney",kidney_fragments)
+atac_wholebrain<-create_tissue_object("WholeBrain",wholebrain_fragments)
+atac_liver<-create_tissue_object("Liver",liver_fragments)
+
+# Merge selected tissues
+atac <- merge(
+  x = atac_spleen,
+  y = list(atac_liver,atac_wholebrain,atac_kidney),
+)
+
+```
+
+```{r, eval=FALSE}
+# Add vars to keep
+keep <- c(keep, 'atac')
+# Remove remaining variables
+rm(list=ls()[!(ls() %in% keep)])
+```
+
+```{r, eval=FALSE}
+saveRDS(atac, file=paste0(resultsdir, 'ATAC.0.step_2.initial_seurat.RDS'))
+```
+
+We have stored the atac object at every step of this process. If you get stuck in any step you have always the option to read the corresponding object precalculated by us. If you do so, you need to run this piece of code below to update the path to fragment files.
+
+```{r, eval=FALSE}
+# I haven't encounter any error in previous chunks, so leaving this chunk intact
+
+#yourpath <- "/YOUR_PATH/fragments/"
+#fragment_file_name <- lapply(atac@assays$peaks@fragments, function(x) {basename(x@path) }) %>% unlist()
+
+
+#for (x in c(1:4)){
+#  atac@assays$peaks@fragments[[x]] <- UpdatePath(atac@assays$peaks@fragments[[x]], new.path = paste0(yourpath, #fragment_file_name[x]))
+#}
+
+```
+
+### Step 3. Add gene annotation
+
+```{r, eval=FALSE}
+atac
+atac[['peaks']]
+
+```
+
+The ChromatinAssay allows some additional specialized functions for chromatin accessibility data. For example, storing motif information, gene annotations and genome information.
+For example, if the ChromatinAssay is set as the active assay in the seurat object, we can see the genomic ranges of each feature of the object, the peaks in our case.
+
+```{r, eval=FALSE}
+granges(atac)
+```
+
+Load the gene annotation to the object. Since the ATAC-seq data was mapped to the mm9 genome, we need to lift over the annotation from the mm10 to the mm9 assembly.
+
+```{r, eval=FALSE}
+#BiocManager::install("EnsDb.Mmusculus.v79")
+#BiocManager::install("biovizBase")
+library(biovizBase)
+library(EnsDb.Mmusculus.v79)
+
+# extract gene annotations from EnsDb
+annotations <- GetGRangesFromEnsDb(ensdb = EnsDb.Mmusculus.v79)
+
+# change to UCSC style since the data was mapped to mm9
+ucsc.levels <- str_replace(string=paste("chr",seqlevels(annotations),sep=""), pattern="chrMT", replacement="chrM")
+seqlevels(annotations) <- ucsc.levels 
+
+#import chain file and lift over from mm10 to mm9
+chain <- rtracklayer::import.chain(paste0(datadir, "mm10ToMm9.over.chain"))
+annotations_mm9 <- rtracklayer::liftOver(annotations, chain = chain)
+annotations_mm9 <- unlist(annotations_mm9)
+
+# Compare coordinates before and after conversion
+subset(annotations, gene_name =="Neurod2" )
+subset(annotations_mm9, gene_name =="Neurod2" )
+
+# Check same example gene information after the lift over
+genome(annotations_mm9) <- "mm9"
+
+# add the gene information to the object
+Annotation(atac) <- annotations_mm9
+
+
+```
+
+```{r, eval=FALSE}
+# Remove remaining variables
+rm(list=ls()[!(ls() %in% keep)])
+```
+
+```{r, eval=FALSE}
+saveRDS(atac, file=paste0(resultsdir, 'ATAC.0.step_3.annotated_seurat.RDS'))
+```
+
+### Step 4. Quality control
+
+#### TSS enrichment score
+
+We compute the transcription start site (TSS) enrichment score, which is based on the ratio between the fragments that overlap the TSS with respect to the ones that do not. Poor ATAC-seq experiments tend to have low scores. The results are stored in the metadata.
+
+```{r, eval=FALSE}
+
+# compute TSS enrichment score per cell
+atac <- TSSEnrichment(object = atac, fast = FALSE, assay='peaks')
+atac$high.tss <- ifelse(atac$TSS.enrichment > 2, 'High', 'Low')
+
+sum(atac$high.tss == "Low")
+sum(atac$high.tss != "Low")
+
+atac[atac$high.tss != "Low"]$TSS.enrichment
+#[atac$high.tss]
+
+```
+
+We can see that there are more than 4 times more Low scores than High scores.
+
+Group cells based on the TSS enrichment scores and plot the accessibility of all TSS.
+
+```{r, eval=FALSE}
+TSSPlot(atac, group.by = 'high.tss') + NoLegend()
+```
+
+#### Nucleosome signal
+
+Calculate the strength of the nucleosome signal per cell: the ratio of fragments between 147 bp and 294 bp (mononucleosome) to fragments \< 147 bp (nucleosome-free). Group cells by nucleosome signal and plot the fragment lengths.
+
+```{r, eval=FALSE}
+atac <- NucleosomeSignal(object = atac)
+atac$nucleosome_group <- ifelse(atac$nucleosome_signal > 4, 'NS > 4', 'NS < 4')
+
+```
+
+```{r, eval=FALSE}
+FragmentHistogram(object = atac,
+                  assay = "peaks",
+                  group.by = 'nucleosome_group',
+                  region = "chr1-1-10000000")
+table(atac$nucleosome_group)
+```
+
+#### FRiP
+
+Calculate the fraction of reads in peaks for each cell using the function FRiP. Values below 15-20% represent low-quality cells or technical artifacts.
+
+```{r, eval=FALSE}
+
+
+# Compute the total number of reads per cell
+total_fragments <- rbind(CountFragments(paste0(datadir, "liver_fragments.filt.bed.gz")),
+                         CountFragments(paste0(datadir, "kidney_fragments.filt.bed.gz")),
+                         CountFragments(paste0(datadir, "spleen_fragments.filt.bed.gz")),
+                         CountFragments(paste0(datadir, "wholebrain_fragments.filt.bed.gz")))
+
+rownames(total_fragments)<-total_fragments$CB
+atac$fragments <- total_fragments[colnames(atac), "frequency_count"]
+
+atac <- FRiP(
+  object = atac,
+  assay = 'peaks',
+  total.fragments = 'fragments'
+)
+
+
+
+```
+
+#### Peaks in blacklist regions
+
+Calculate the ratio of peaks overlapping genome blacklist regions, which accumulate reads in low-quality cells.
+
+```{r, eval=FALSE}
+
+
+library(GreyListChIP)
+data("mm9.blacklist")
+
+atac$blacklist_fraction <- FractionCountsInRegion(
+  object = atac, 
+  assay = 'peaks',
+  regions = mm9.blacklist
+)
+# There is no overlap of the peaks with the blacklist regions.
+
+
+```
+
+#### Visualize and threshold
+
+Plot those metrics plus the total number of reads in peaks (nCount_peaks), which is a measure of cellular sequencing depth/complexity. Cells with low sequencing depth have to be excluded and cells with high values too, as they represent technical artifacts.
+
+```{r, eval=FALSE}
+VlnPlot(
+  object = atac,
+  features = c('nCount_peaks','TSS.enrichment', 'FRiP','blacklist_fraction','nucleosome_signal'),
+  pt.size = 0, #0.1,
+  ncol = 4
+)
+
+```
+
+Filter the cells based on those metrics.
+
+```{r, eval=FALSE}
+dim(atac)
+atac <- subset(
+  x = atac,
+  subset = nCount_peaks >  3000 &
+    nCount_peaks <  20000 &
+    FRiP >  0.15 &
+    nucleosome_signal <  4 &
+    TSS.enrichment > 2
+)
+dim(atac)
+```
+
+```{r, eval=FALSE}
+# Remove remaining variables
+rm(list=ls()[!(ls() %in% keep)])
+```
+
+```{r, eval=FALSE}
+saveRDS(atac, file=paste0(resultsdir, 'ATAC.0.step_4.filtered_seurat.RDS'))
+```
+
+# Objective 1: Clustering and cell identification
+
+### Step 1. Normalization and linear dimensionality reduction
+
+Signac implements a method called frequency-inverse document frequency (TF-IDF), which normalizes both across cells to correct differences in cellular sequencing depth and across peaks to give higher values to more rare peaks.
+
+```{r, eval=FALSE}
+
+#Normalization
+atac <- RunTFIDF(atac)
+
+```
+
+Exercise: Select the top n% of features (peaks) for the dimensional reduction, leaving out the bottom 10%.
+
+```{r, eval=FALSE}
+
+#Feature selection. 
+atac <- FindTopFeatures(object=atac, min.cutoff = "q10", verbose = TRUE)
+
+```
+
+Apply singular value decomposition (SVD) on the TD-IDF matrix, using the features selected above, which returns a representation of the object with reduced dimensions.
+
+```{r, eval=FALSE}
+
+#Dimension reduction
+atac <- RunSVD(atac)
+
+```
+
+These two steps combined are known as latent semantic indexing (LSI). Correlation between each LSI component and sequencing depth:
+
+```{r, eval=FALSE}
+DepthCor(atac)
+```
+
+As can be seen, there is a high correlation between the first component and sequencing depth. Downstream steps will be performed wihout this component, as it represents technical variation rather than biological variation.
+
+```{r, eval=FALSE}
+saveRDS(atac, file=paste0(resultsdir, 'ATAC.1.step_1.lsi_svd.RDS'))
+```
+
+### Step 2. Non-linear dimensionality reduction and clustering
+
+With the cells embedded in a low-dimensional space, we apply non-linear dimension reduction for visualization and perform graph-based clustering.
+
+```{r, eval=FALSE}
+
+## Select the number of dimensions
+ElbowPlot(atac, ndims = 50, reduction = 'lsi')
+
+## Run UMAP and FindNeighbourgs on the lsi reduction 
+
+atac <- RunUMAP(object=atac, reduction = 'lsi', verbose = FALSE)
+atac <- FindNeighbors(object=atac, reduction = 'lsi', verbose = FALSE)
+atac <- FindClusters(object = atac, verbose = FALSE, algorithm = 3, resolution = 0.3)
+
+```
+
+Visualize the clusterized cells in the 2-dimensional space.
+
+```{r, eval=FALSE}
+p1 <- DimPlot(object = atac, label = TRUE) + NoLegend()
+p1 
+```
+
+Check quality in individual clusters:
+
+```{r, eval=FALSE}
+VlnPlot(
+  object = atac,
+  features = c('nCount_peaks','TSS.enrichment', 'FRiP','blacklist_fraction','nucleosome_signal'),
+  pt.size = 0, #0.1,
+  ncol = 4
+)
+
+```
+
+```{r, eval=FALSE}
+saveRDS(atac, file=paste0(resultsdir, 'ATAC.1.step_2.umap_clustering.RDS'))
+```
+
+# Objective 2. Find marker genes
+
+```{r, eval=FALSE}
+ident.1.atac <- 8 # Select one cluster to analyze
+idents.atac <- c(ident.1.atac) 
+group.atac <- 'seurat_clusters'
+keep <- c(keep, 'ident.1.atac', 'idents.atac', 'group.atac')
+```
+
+## Option A. Closest genes to marker peaks
+
+#### Step 1. Find marker peaks
+
+We can use FindMarkers to find the marker peaks of a given cluster. Note that we could use the same function to find the marker peaks between two different clusters, or FindAllMarkers to compute the marker peaks of all the clusters identified in previous steps.
+
+In this example, we will try to find marker peaks for the cluster of your choice. We add the total number of fragments as a latent variable to control for the differential sequencing depth between the cells.
+
+```{r, eval=FALSE}
+
+# Find marker peaks
+marker.peaks <- FindMarkers(
+  object = atac,
+  assay = 'peaks',
+  group.by = group.atac,
+  ident.1 = ident.1.atac,
+  #ident.2 = ident.2.atac, Add this line if you want to compare againts another cluster
+  only.pos = FALSE,
+  test.use = 'LR',
+  min.pct = 0.05,
+  latent.vars = 'fragments' 
+)
+marker.peaks
+
+keep <- c(keep, 'marker.peaks')
+
+
+```
+
+Make violin plot and feature plot showing that the marker peak is specific to the chosen cluster.
+
+```{r, eval=FALSE}
+feat_example_1 <- rownames(marker.peaks[order(marker.peaks$avg_log2FC, decreasing = TRUE),])[1]
+
+p1 <- VlnPlot(
+  object = atac,
+  features = feat_example_1,
+  pt.size = 0.1,
+  group.by = group.atac,
+) + NoLegend() + ylab(label = "Chromatin accesibiliy")
+
+p2 <- FeaturePlot(
+  object = atac,
+  features = feat_example_1,
+  pt.size = 0.1,
+  label = T
+)
+p1 | p2
+
+```
+
+A faster way to find differentially accessible peaks between cells is to look at the fold change accessibility between two groups of cells. However, this cannot account for latent variables such as sequencing depth.
+
+```{r, eval=FALSE}
+
+
+marker.peaks.fc <- FoldChange(atac,
+                              ident.1 = ident.1.atac, 
+                              group.by = group.atac)
+head(marker.peaks.fc)
+
+keep <- c(keep, 'marker.peaks.fc')
+
+ 
+```
+
+Exercise: Repeat Violin plots and feature plots using top markers deduced from fold change
+
+```{r, eval=FALSE}
+feat2 <- rownames(marker.peaks.fc[order(marker.peaks.fc$avg_log2FC, decreasing = TRUE),])[1]
+
+viol <- VlnPlot(
+  object = atac,
+  features = feat2 
+  pt.size = 0.1,
+  group.by = group.atac,
+) + NoLegend() + ylab(label = "Chromatin accesibiliy")
+
+feat <- FeaturePlot(
+  object = atac,
+  features = feat2 
+  pt.size = 0.1,
+  label = T
+)
+
+viol | feat
+
+```
+
+#### Step 2. Find marker genes as the closest to marker peaks
+
+Look at the genes that are closest to the differentially accessible peaks of each cell type/cluster.
+
+```{r, eval=FALSE}
+
+
+# Select differentially accessible peaks that are open 
+open_peaks_1 <- rownames(marker.peaks[marker.peaks$avg_log2FC > 0.5, ])
+
+# Find closest genes
+closest_genes_1 <- ClosestFeature(atac, regions = open_peaks_1)
+
+keep <- c(keep, 'closest_genes_1')
+
+
+```
+
+```{r, eval=FALSE}
+head(closest_genes_1)
+```
+
+#### Step 3. Visualize genes and peaks
+
+```{r, eval=FALSE}
+open_peaks_1[1]
+closest_genes_1[1,]
+
+CoveragePlot(
+  object = atac,
+  assay = 'peaks',
+  region = open_peaks_1[1],
+  extend.upstream = 40000,
+  extend.downstream = 20000,
+  group.by = group.atac
+)
+```
+
+## Option B. Find marker genes using gene activity
+
+#### Step 1. Create Gene Activity Matrix
+
+Once we have the cells split in clusters, we need to identify the cell types that they might be representing. For that purpose, we create a gene activity matrix with the GeneActivity function, which measures the number of reads in each cell that map around the TSS of each gene.
+
+```{r, eval=FALSE}
+
+gene.activities <- GeneActivity(atac, extend.upstream = 2000, extend.downstream = 2000)
+
+# add the gene activity matrix to the Seurat object as a new assay
+atac[['ACTIVITY']] <- CreateAssayObject(counts = gene.activities[,colnames(atac)])
+
+
+```
+
+```{r, eval=FALSE}
+saveRDS(atac, file=paste0(resultsdir, 'ATAC.2B.step_1.activity.RDS'))
+```
+
+#### Step 2. Normalize
+
+We also need to normalize the computed gene activity.
+
+```{r, eval=FALSE}
+
+
+DefaultAssay(atac) <- 'ACTIVITY'
+
+# normalize the gene activity matrix
+atac <- NormalizeData(
+  object = atac,
+  assay = 'ACTIVITY',
+  normalization.method = 'LogNormalize',
+  scale.factor = median(atac$nCount_ACTIVITY)
+)
+atac <- ScaleData(atac)
+
+
+```
+
+At this point, we can visualize the activity of any gene we want, and this might come handy if we already know some gene that we could use as marker. Albumin, for example, is mainly produced by hepatocytes. We could also use the genes previously identified as markers from the peaks to check the consistency of the gene activity measurement.
+
+```{r, eval=FALSE}
+FeaturePlot(
+  object = atac,
+  features = 'Alb',
+  pt.size = 0.1,
+  max.cutoff = 'q95'
+)
+FeaturePlot(
+  object = atac,
+  features = closest_genes_1$gene_name[1],
+  pt.size = 0.1,
+  max.cutoff = 'q95'
+)
+```
+
+```{r, eval=FALSE}
+# Remove remaining variables
+rm(list=ls()[!(ls() %in% keep)])
+```
+
+```{r, eval=FALSE}
+saveRDS(atac, file=paste0(resultsdir, 'ATAC.2B.step_2.activity_norm.RDS'))
+```
+
+#### Step 3. Find markers in gene activity
+
+We can use FindMarkers to find the marker genes of a given cluster. Note that we could use the same function to find the marker genes between two different clusters, or FindAllMarkers to compute the marker genes of all the clusters identified. In this example, we will try to find marker genes for your favorite cluster.
+
+```{r, eval=FALSE}
+
+
+marker.genes.activity <- FindMarkers(atac,
+                                     assay = 'ACTIVITY',
+                                     test.use='LR',
+                                     ident.1 = ident.1.atac,
+                                     group.by = group.atac,
+                                     min.pct = 0.25,
+                                     only.pos = FALSE, # TRUE,
+                                     latent.vars = 'fragments'
+)
+
+keep <- c(keep, 'marker.genes.activity')
+
+```
+
+```{r, eval=FALSE}
+marker.genes.activity
+```
+
+```{r, eval=FALSE}
+saveRDS(marker.genes.activity, paste0(resultsdir, 'ATAC.2B.step_3.marker_genes_activity.', ident.1.atac, '.RDS'))
+```
+
+Use FindAllMarkers to find marker genes for all the clusters, or import the precalculated table.
+
+```{r, eval=FALSE}
+
+marker.genes.activity.all <- FindAllMarkers(atac,
+                                            assay = 'ACTIVITY',
+                                            test.use='LR',
+                                            min.pct = 0.25,
+                                            only.pos = TRUE,
+                                            group.by = group.atac,
+                                            latent.vars = 'fragments')
+
+keep <- c(keep, 'marker.genes.activity.all')
+saveRDS(marker.genes.activity.all, paste0(resultsdir, 'ATAC.2B.step_3.marker_genes_activity.all_clusters.RDS'))
+```
+
+This way, we can display the activity of the discovered marker genes to identify which cell types the clusters represent.
+
+```{r, eval=FALSE}
+marker.genes.activity <- marker.genes.activity[order(marker.genes.activity$avg_log2FC, decreasing = TRUE),]
+
+FeaturePlot(
+  object = atac,
+  features = head(rownames(marker.genes.activity), 3),
+  pt.size = 0.1,
+  max.cutoff = 'q95', 
+  ncol = 3, 
+  label =T
+)
+FeaturePlot(
+  object = atac,
+  features = tail(rownames(marker.genes.activity), 3),
+  pt.size = 0.1,
+  max.cutoff = 'q95', 
+  ncol = 3,
+  label = T
+)
+```
+
+#### Step 4. Annotate the clusters found using marker genes
+
+Exercise: Using the information provided by FindAllMarkers you can take notebook and annotate all clusters that we have obtained in the clustering step. The cluster annotation step heavily relies on the domain knowledge of the researchers.
+
+Add a column in metadata with you own annotatations You can use the function mapvalues from plyr.
+
+Now you can compare the identities you have predicted for the clusters with the ones that were already annotated in the metadata of the original dataset.
+
+```{r, eval=FALSE}
+metadata.fname <- paste0(datadir, "cell_metadata.FINAL.rds")
+metadata <- readRDS(file = metadata.fname)
+
+### Add column cell_label
+### If you have filtered the cells you will need to subset the metadata
+
+
+p1 <- DimPlot(object = atac, group.by = 'seurat_clusters', label = TRUE) + NoLegend()
+p2 <- DimPlot(object = atac, group.by = 'cell_label', label = TRUE) + NoLegend()
+p3 <- DimPlot(object = atac, group.by = 'tissue', label = TRUE) + NoLegend()
+p1 | p2 | p3
+
+```
+
+Exercise: Find markers (PEAKS and GENE ACTIVITY) defining all three types of neurons and plot the profiles of some of them across cell-types using the function coverage plot.
+
+```{r, eval=FALSE}
+marker.genes.peaks.neur <- FindAllMarkers(atac,
+                                            assay = 'PEAKS',
+                                            test.use='LR',
+                                            min.pct = 0.25,
+                                            only.pos = TRUE,
+                                            group.by =  'seurat_clusters',
+                                            latent.vars = 'fragments')
+
+marker.genes.activity.neur <- FindAllMarkers(atac,
+                                            assay = 'ACTIVITY',
+                                            test.use='LR',
+                                            min.pct = 0.25,
+                                            only.pos = TRUE,
+                                            group.by =  'seurat_clusters',
+                                            latent.vars = 'fragments')
+
+cov_plot <- CoveragePlot(
+  object = atac,
+  features = rownames(marker.genes.peaks.neur),
+  annotation = FALSE,
+  peaks = FALSE
+)
+cov_plot
+
+cov_plot2 <- CoveragePlot(
+  object = atac,
+  features = rownames(marker.genes.activity.neur),
+  annotation = FALSE,
+  peaks = FALSE
+)
+cov_plot2
+```
+
+# Objective 3. Find marker motifs
+
+We will explore two complementary options for performing motif analysis: (A) one by finding overrepresented motifs in a set of differentially accessible peaks, (B) another method performing differential motif activity analysis between groups of cells.
+
+### Step 1. Add motif information
+
+First, we need to add the motif information to the Seurat object. To add the DNA sequence motif information required for motif analyses, we can run the AddMotifs() function:
+
+```{r, eval=FALSE}
+
+library(BSgenome.Mmusculus.UCSC.mm9)
+library(JASPAR2020)
+library(motifmatchr)
+library(TFBSTools)
+
+DefaultAssay(atac) <- 'peaks'
+
+# Get a list of motif position frequency matrices from the JASPAR database
+pfm <- getMatrixSet(
+  x = JASPAR2020,
+  opts = list(species = 10090, all_versions = FALSE)
+)
+
+# add motif information
+
+```
+
+Use the function AddMotifs to include information on the position of each motif in our peaks, compute GC content of each peak and pass all this info to the atac object. Use this genome object: BSgenome.Mmusculus.UCSC.mm9
+
+```{r, eval=FALSE}
+atac <- AddMotifs(
+  atac, BSgenome.Mmusculus.UCSC.mm9, pfm, assay = 'peaks', verbose = TRUE)
+)
+
+RegionStats(atac, BSgenome.Mmusculus.UCSC.mm9, assay = 'peaks', verbose = TRUE)
+
+pfm[["MA0622.1"]]
+```
+
+Explore the motif object incorporated to atac 1) Find the binary matrix indicating the presence of a motif in each peak 2) Find the genomic position of each motif
+
+```{r, eval=FALSE}
+motifObject <- SeuratObject::GetAssayData(atac, slot="motifs")
+
+MotifPlot(atac,
+   motifs=head(colnames(motifObject))
+)
+
+keep <- c(keep, 'motifObject')
+```
+
+```{r, eval=FALSE}
+saveRDS(atac, file=paste0(resultsdir, 'ATAC.3.step_1.withmotifs_seurat.RDS'))
+```
+
+```{r, eval=FALSE}
+# Remove remaining variables
+rm(list=ls()[!(ls() %in% keep)])
+```
+
+## Option A. Motif enrichment in differentially accessible peaks
+
+#### Step 1. Choose a set of background peaks
+
+We need to find a matching set of background peaks to properly calculate enrichments. We can choose a set of peaks matched for GC content, but we can additionally include the background peaks that are accessible in the cells analyzed.\
+The AccessiblePeaks() function can be used for that purpose and find the set of possible background peaks open in the set of cells compared in FindMarkers(), and then create a GC-content-matched set of peaks from this larger set using MatchRegionStats().
+
+```{r, eval=FALSE}
+
+# get top differentially accessible peaks for one cell identity (log2FC filter)
+top.da.peak <- rownames(dplyr::filter(marker.peaks, avg_log2FC > 0.5 & p_val < 0.005))
+
+# get all accessible peaks in the cells you want to compare
+open.peaks <- AccessiblePeaks(FILL)
+
+# match the overall GC content in the peak set
+meta.feature <- GetAssayData(atac, assay = "peaks", slot = "meta.features")
+meta.feature
+
+peaks.matched <- MatchRegionStats(
+  meta.feature = meta.feature[open.peaks, ],
+  query.feature = meta.feature[top.da.peak, ],
+  n = 50000
+)
+
+
+```
+
+peaks.matched can then be used as the background peak set by setting background=peaks.matched in FindMotifs().
+
+#### Step 2. Find enriched motifs in marker peaks
+
+Exercise: Use the function FindMotifs to find enriched motifs in your set of differentially accessible peaks.
+
+```{r, eval=FALSE}
+
+# test enrichment
+enriched.motifs <- FindMotifs(
+  object = atac, features = top.da.peak
+)
+
+keep <- c(keep, 'enriched.motifs')
+
+```
+
+```{r, eval=FALSE}
+enriched.motifs
+```
+
+We can plot the position weight matrices for the motifs, so we can visualize the different motif sequences.
+
+```{r, eval=FALSE}
+MotifPlot(
+  object = atac,
+  motifs = head(rownames(enriched.motifs))
+)
+```
+
+```{r, eval=FALSE}
+# Remove remaining variables
+rm(list=ls()[!(ls() %in% keep)])
+```
+
+Search for TF whise motif is enriched in one cell type and the TF itself has higher gene activity in the very same cell types.
+
+## Option B. Differential motif activity (ChromVAR)
+
+As we explained in the introduction of the session, we can use chromVAR to compute a per-cell motif activity score. We will be able to visualize motif activities per cell, and also find differentially-active motifs between cell types using as we did for peak accessibility or gene activities.\
+
+#### Step 1. Run ChromVAR
+
+Exercice: Run ChromVar funtion on the atac object and set ´chromvar´ as the default assay using DefaultAssay function
+
+```{r, eval=FALSE}
+
+library(chromVAR)
+
+atac <- RunChromVAR(
+  object = atac,
+  genome = BSgenome.Mmusculus.UCSC.mm9
+)
+
+DefaultAssay(atac) <- 'chromvar'
+
+```
+
+At this point, we can visualize the computed activity of any motif we might be interested in, such as the one obtained in the previous approach (testing motif enrichment in a set of differentially open set of peaks).
+
+```{r, eval=FALSE}
+# look at the activity of a known motif (previous step)
+FeaturePlot(
+  object = atac,
+  features = rownames(enriched.motifs)[1], #"MA0006.1", # 
+  min.cutoff = 'q10',
+  max.cutoff = 'q90',
+  pt.size = 0.1,
+  label = T
+)
+```
+
+```{r, eval=FALSE}
+saveRDS(atac, file=paste0(resultsdir, 'ATAC.3B.step_1.chromvar.RDS'))
+```
+
+#### Step 2. Find marker motifs
+
+Let's now test for differential motif enrichment scores between cell types and you can check if it gives similar results as performing a motif enrichment test on differentially accessible peaks between the cell types (shown above). Again, you can use the function FindAllMarker to get top enriched motifs for each cell types against the rest.
+
+```{r, eval=FALSE}
+
+marker.motifs.CV <- FindMarkers(
+  object = atac,
+  assay = 'chromvar',
+  ident.1 = ident.1.atac,
+  group.by = group.atac,
+  only.pos = FALSE,
+  test.use = 'LR',
+  latent.vars = 'fragments'
+)
+marker.motifs.CV <- marker.motifs.CV[order(marker.motifs.CV$avg_log2FC, decreasing = TRUE),]
+marker.motifs.CV
+
+keep <- c(keep, 'marker.motifs.CV')
+
+
+```
+
+```{r, eval=FALSE}
+ident.1.atac
+MotifPlot(
+  object = atac,
+  motifs = head(rownames(marker.motifs.CV)),
+  assay = 'peaks'
+)
+```
+
+```{r, eval=FALSE}
+# look at the activity of a found motif (previous step)
+FeaturePlot(
+  object = atac,
+  features = rownames(marker.motifs.CV)[1],
+  min.cutoff = 'q10',
+  max.cutoff = 'q90',
+  pt.size = 0.1,
+  label = T
+)
+FeaturePlot(
+  object = atac,
+  features = rownames(tail(marker.motifs.CV, 1))[1],
+  min.cutoff = 'q10',
+  max.cutoff = 'q90',
+  pt.size = 0.1,
+  label = T
+)
+```
+
+Exercise: Now try to identify transcription factors associated to enriched motifs that are themselves enriched in the corresponding cell types at the level of ATAC-seq signal in their promoters (i.e. GENE ACTIVITY). Compare next to each other two feature plots showing motif activity and gene activity.
+
+You will need to run FindAllMarkers just as previously done for marker genes:
+
+```{r, eval=FALSE}
+marker.motifs.CV.all <- FindAllMarkers(
+  object = atac,
+  assay = 'chromvar',
+  group.by = group.atac,
+  only.pos = FALSE,
+  test.use = 'LR',
+  latent.vars = 'fragments'
+)
+marker.motifs.CV.all <- marker.motifs.CV.all[order(marker.motifs.CV.all$avg_log2FC, decreasing = TRUE),]
+marker.motifs.CV.all
+
+keep <- c(keep, 'marker.motifs.CV.all')
+
+saveRDS(marker.motifs.CV.all, paste0(resultsdir, 'ATAC.3B.step_2.marker_motifs_chromvar.all_clusters.RDS'))
+```
+
+```{r, eval=FALSE}
+
+library(plyr)
+
+mmotif <- marker.motifs.CV.all %>% dplyr::filter(p_val_adj<0.05, avg_log2FC >1) %>% dplyr::filter(cluster==7)
+motifsnames <- motifObject@motif.names %>% unlist()
+mmotif$tf <- mapvalues(mmotif$gene, from= names(motifsnames), to=motifsnames)
+ 
+mactivity <- marker.genes.activity.all %>% dplyr::filter(p_val_adj<0.05, avg_log2FC >0.5) %>% dplyr::filter(cluster==7)
+mactivity$tf <- rownames(mactivity)
+
+dplyr::filter(mactivity, tf %in% mmotif$tf)
+
+DefaultAssay(atac)<-"chromvar"
+p1 <- FeaturePlot(
+  object = atac,
+  features = names(motifsnames)[motifsnames=="Pax2"],
+  cols = c("red","grey","blue"),
+  label=TRUE
+)
+
+DefaultAssay(atac)<-"ACTIVITY"
+p2 <-FeaturePlot(
+  object = atac,
+  features = "Pax2",
+  label = TRUE
+)
+
+p1 | p2
+```
+
